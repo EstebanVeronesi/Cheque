@@ -1,123 +1,102 @@
 import streamlit as st
-import requests
-import urllib3
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+import time
 
-# --- CONFIGURACIÓN ---
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-st.set_page_config(page_title="Verificador Frigorífico", page_icon="🥩")
+st.set_page_config(page_title="Scanner Frigorífico", page_icon="🥩")
 
-# --- MOTOR DE BÚSQUEDA ---
-
-def consultar_api_oficial(cuit):
-    """
-    Consulta los DOS endpoints oficiales del BCRA:
-    1. Deudas (Situación bancaria)
-    2. Cheques Rechazados (La que mencionaste)
-    """
-    base_url = "https://api.bcra.gob.ar/centraldedeudores/v1.0/Deudas"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36'}
+def espiar_con_selenium(cuit_raw):
+    # Formateo de CUIT
+    s_cuit = str(cuit_raw)
+    cuit_fmt = f"{s_cuit[:2]}-{s_cuit[2:-1]}-{s_cuit[-1]}"
     
-    resultados = {
-        "deudas": [],
-        "cheques_api": []
-    }
-
+    # URL del objetivo (Usamos CuitOnline porque BCRA tiene Captcha que bloquea a Selenium)
+    url = f"https://www.cuitonline.com/detalle/{cuit_fmt}/"
+    
+    # --- CONFIGURACIÓN DE CHROME HEADLESS (Para Nube) ---
+    options = Options()
+    options.add_argument("--headless")  # No abrir ventana gráfica
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    
+    status = "Limpio"
+    evidencia = []
+    
     try:
-        # 1. Consultar Situación
-        r_deudas = requests.get(f"{base_url}/{cuit}", headers=headers, verify=False, timeout=5)
-        if r_deudas.status_code == 200:
-            data = r_deudas.json().get('results', [])
-            resultados["deudas"] = data if isinstance(data, list) else []
-
-        # 2. Consultar Cheques (Tu hallazgo)
-        r_cheques = requests.get(f"{base_url}/ChequesRechazados/{cuit}", headers=headers, verify=False, timeout=5)
-        if r_cheques.status_code == 200:
-            data_cheques = r_cheques.json().get('results', [])
-            resultados["cheques_api"] = data_cheques if isinstance(data_cheques, list) else []
+        # Iniciamos el navegador
+        driver = webdriver.Chrome(options=options)
+        driver.get(url)
+        
+        # Esperamos a que cargue (JavaScript, Tablas, Publicidad)
+        time.sleep(3) 
+        
+        # Leemos TODO el texto visible de la página
+        body = driver.find_element(By.TAG_NAME, "body").text.upper()
+        
+        # Palabras clave de terror para un vendedor
+        palabras_clave = [
+            "SIN FONDOS", 
+            "CHEQUE RECHAZADO", 
+            "CUENTA CERRADA", 
+            "INHABILITADO",
+            "DEUDA IRRECUPERABLE",
+            "SITUACIÓN 4",
+            "SITUACIÓN 5"
+        ]
+        
+        # Buscamos coincidencias
+        for palabra in palabras_clave:
+            if palabra in body:
+                evidencia.append(palabra)
+        
+        # Si encontramos algo, capturamos el contexto
+        if evidencia:
+            status = "PELIGRO"
             
     except Exception as e:
-        print(f"Error API: {e}")
+        return {"status": "ERROR", "msg": str(e)}
     
-    return resultados
-
-def espiar_web_alternativa(cuit_raw):
-    """
-    MODO RESPALDO: Busca en web externa por si la API Oficial tiene demora en la carga.
-    """
-    s_cuit = str(cuit_raw)
-    if len(s_cuit) != 11: return {"riesgo": False}
-
-    cuit_fmt = f"{s_cuit[:2]}-{s_cuit[2:-1]}-{s_cuit[-1]}"
-    url = f"https://www.cuitonline.com/detalle/{cuit_fmt}/"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/115.0.0.0 Safari/537.36', 'Referer': 'https://google.com'}
-    
-    try:
-        r = requests.get(url, headers=headers, timeout=8)
-        texto = r.text.upper()
-        palabras = ["SIN FONDOS", "CHEQUE RECHAZADO", "CUENTA CERRADA"]
-        encontradas = [p for p in palabras if p in texto]
-        
-        if encontradas:
-            return {"riesgo": True, "fuente": url, "detalle": encontradas[0]}
+    finally:
+        # Importante: Cerrar el navegador para no saturar la memoria
+        try:
+            driver.quit()
+        except:
+            pass
             
-    except:
-        pass
-    
-    return {"riesgo": False}
+    return {"status": status, "evidencia": evidencia, "link": url}
 
 # --- FRONTEND ---
+st.title("🥩 Scanner Profundo (Selenium)")
+st.caption("Este método usa un navegador real. Es más lento pero más preciso.")
 
-st.title("🥩 Semáforo de Crédito")
-st.caption("Consulta: API Deudas + API Cheques + Web Externa")
+cuit_input = st.number_input("CUIT del Cliente", min_value=0, format="%d")
 
-cuit_input = st.number_input("Ingresá CUIT sin guiones", min_value=0, format="%d")
-
-if st.button("🔍 ANALIZAR AHORA", type="primary", use_container_width=True):
-    
+if st.button("🕵️‍♂️ ESCANEAR AHORA", type="primary"):
     if cuit_input < 20000000000:
-        st.warning("CUIT Inválido")
+        st.error("CUIT muy corto.")
         st.stop()
-
-    with st.spinner('Consultando BCRA Oficial y Bases Alternativas...'):
         
-        # 1. Llamamos a TODO
-        datos_oficiales = consultar_api_oficial(cuit_input)
-        datos_web = espiar_web_alternativa(cuit_input)
+    with st.spinner('Iniciando navegador virtual y analizando... (Paciencia, tarda unos segundos)'):
+        resultado = espiar_con_selenium(cuit_input)
         
-        cheques_api = datos_oficiales["cheques_api"]
-        deudas_api = datos_oficiales["deudas"]
-        
-        # Cálculo de situación máxima
-        max_sit = 1
-        if deudas_api:
-            sits = [d.get('situacion', 1) for d in deudas_api if isinstance(d, dict)]
-            max_sit = max(sits, default=1)
-
-        # --- LÓGICA DE PRIORIDADES ---
-
-        # CASO 1: La API Oficial confirma cheques (La fuente más fidedigna)
-        if len(cheques_api) > 0:
-            st.error(f"🛑 RECHAZADO: API OFICIAL DETECTÓ {len(cheques_api)} CHEQUES")
-            for c in cheques_api:
-                monto = c.get('monto', '?')
-                fecha = c.get('fechaRechazo', '?')
-                causa = c.get('causal', 'Sin Fondos')
-                st.warning(f"💸 ${monto} - {fecha} ({causa})")
-
-        # CASO 2: La API calla, pero la Web grita (El caso de tu CUIT problemático)
-        elif datos_web["riesgo"]:
-            st.error("🛑 RIESGO ALTO (DETECTADO POR WEB)")
-            st.write("La API oficial no muestra cheques aún, pero el escáner web encontró palabras clave:")
-            st.warning(f"⚠️ Se detectó mención de '{datos_web['detalle']}'")
-            st.markdown(f"[Ver reporte externo]({datos_web['fuente']})")
-
-        # CASO 3: Deuda Bancaria sin cheques
-        elif max_sit > 1:
-            st.warning(f"⚠️ PRECAUCIÓN: Situación {max_sit} en Bancos")
-            st.json(deudas_api)
-
-        # CASO 4: Limpio total
+        if resultado["status"] == "PELIGRO":
+            st.error("🚨 ALERTA: SE DETECTARON PROBLEMAS")
+            st.write("El navegador encontró las siguientes palabras clave en la ficha del cliente:")
+            
+            # Mostramos las palabras encontradas en rojo
+            for e in resultado["evidencia"]:
+                st.markdown(f"- 🔴 **{e}**")
+            
+            st.warning("Recomendación: NO aceptar cheques sin revisar manualmente.")
+            st.link_button("Ver Ficha Original", resultado["link"])
+            
+        elif resultado["status"] == "ERROR":
+            st.error("Error al intentar abrir el navegador.")
+            st.code(resultado["msg"])
+            
         else:
-            st.success("✅ APROBADO / LIMPIO")
-            st.write("No se encontraron cheques en API ni en Web, y la situación bancaria es 1.")
-            st.balloons()
+            st.success("✅ NO SE ENCONTRARON PALABRAS DE RIESGO")
+            st.write("El escaneo de texto completo no arrojó resultados como 'Sin Fondos' o 'Rechazado'.")
+            st.info("De todos modos, verifica referencias.")
