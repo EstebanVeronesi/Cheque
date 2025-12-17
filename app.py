@@ -22,51 +22,52 @@ def consultar_deuda_bancaria(cuit):
     return []
 
 def espiar_cheques_web(cuit_raw):
-    """Scrapea web alternativa para encontrar cheques RECIENTES (que la API oficial esconde)"""
+    """
+    Versión PARANOICA: Busca en múltiples fuentes y usa búsqueda de texto bruta
+    para no fallar si cambia el diseño de la tabla.
+    """
     s_cuit = str(cuit_raw)
-    # Formateamos a XX-XXXXXXXX-X
     if len(s_cuit) == 11:
         cuit_fmt = f"{s_cuit[:2]}-{s_cuit[2:-1]}-{s_cuit[-1]}"
     else:
-        return [] # CUIT mal formado
+        return {"riesgo": False, "msg": "CUIT inválido"}
 
+    # Fuente 1: CuitOnline (Suele ser la mejor, pero a veces falla)
     url = f"https://www.cuitonline.com/detalle/{cuit_fmt}/"
+    
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
         'Referer': 'https://www.google.com/'
     }
     
-    lista_cheques = []
     try:
         r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.text, 'html.parser')
-            # Buscamos todas las tablas
-            tablas = soup.find_all('table')
-            for tabla in tablas:
-                # Si la tabla habla de fondos o rechazos
-                texto_tabla = tabla.text.upper()
-                if "FONDOS" in texto_tabla or "RECHAZO" in texto_tabla:
-                    filas = tabla.find_all('tr')
-                    for fila in filas[1:]: # Saltamos encabezado
-                        cols = fila.find_all('td')
-                        if len(cols) >= 4:
-                            # Extraemos datos sucios
-                            fecha = cols[1].text.strip()
-                            monto = cols[2].text.strip()
-                            causa = cols[3].text.strip()
-                            
-                            if "FONDOS" in causa.upper() or "CUENTA" in causa.upper():
-                                lista_cheques.append({
-                                    'fecha': fecha,
-                                    'monto': monto,
-                                    'causa': causa
-                                })
+        
+        # --- LÓGICA DE FUERZA BRUTA ---
+        texto_entero = r.text.upper()
+        
+        # Palabras gatillo que indican problemas
+        palabras_peligrosas = ["SIN FONDOS", "CUENTA CERRADA", "CHEQUE RECHAZADO", "RECHAZOS:"]
+        
+        encontradas = [p for p in palabras_peligrosas if p in texto_entero]
+        
+        if encontradas:
+            # Si encontramos palabras peligrosas, intentamos ver cuántas veces aparecen
+            cantidad = texto_entero.count("SIN FONDOS")
+            if cantidad == 0: cantidad = len(encontradas) # Por si fue otra palabra
+            
+            return {
+                "riesgo": True, 
+                "fuente": "CuitOnline", 
+                "cantidad_estimada": cantidad,
+                "link": url
+            }
+            
     except Exception as e:
         print(f"Error scraping: {e}")
         
-    return lista_cheques
-
+    return {"riesgo": False, "msg": "No se detectaron palabras clave"}
+    
 # --- INTERFAZ DE USUARIO (FRONTEND) ---
 
 st.title("🥩 Detector de Cheques")
@@ -82,43 +83,35 @@ if st.button("🔍 INVESTIGAR A FONDO", type="primary", use_container_width=True
         st.warning("⚠️ El CUIT parece incompleto o inválido.")
         st.stop() # Detiene la ejecución aquí. No necesitamos 'else'.
 
-    # 2. Ejecución del análisis
-    with st.spinner('Cruzando bases de datos (Bancos + Cheques)...'):
-        
-        # Llamamos a las funciones
+    with st.spinner('Auditando cliente...'):
         deudas = consultar_deuda_bancaria(cuit_input)
-        cheques = espiar_cheques_web(cuit_input)
         
-        # --- LÓGICA DEL SEMÁFORO ---
+        # Usamos la nueva función paranoica
+        resultado_web = espiar_cheques_web(cuit_input)
         
-        # CASO ROJO: Cheques rechazados (Prioridad máxima)
-        if len(cheques) > 0:
-            st.error(f"🛑 ¡ALERTA MÁXIMA! {len(cheques)} CHEQUES RECHAZADOS")
-            st.write("Datos encontrados en web alternativa:")
-            for c in cheques:
-                st.warning(f"💸 {c['monto']} - {c['causa']} ({c['fecha']})")
-        
-        # CASO AMARILLO: Deuda Bancaria
-        elif len(deudas) > 0:
-            # Buscamos la peor situación
-            situaciones = []
-            for d in deudas:
-                if isinstance(d, dict):
-                    situaciones.append(d.get('situacion', 1))
-            
-            max_sit = max(situaciones) if situaciones else 1
-            
-            if max_sit > 1:
-                st.warning(f"⚠️ OJO: Situación {max_sit} en Bancos (BCRA)")
-                st.json(deudas)
-            else:
-                # Situación 1 es normal, pero avisamos
-                st.success("✅ Situación Bancaria Normal (1)")
-                st.info("El cliente opera con bancos y está al día.")
+        hay_deuda_bancos = False
+        if deudas:
+             # Chequeamos si hay situación > 1
+             sits = [d.get('situacion', 1) for d in deudas if isinstance(d, dict)]
+             if max(sits) > 1: hay_deuda_bancos = True
 
-        # CASO VERDE: Nada de nada
+        # --- SEMÁFORO PRIORITARIO ---
+        
+        # 1. ROJO: La web detectó palabras clave de cheques (Aunque la API diga que no)
+        if resultado_web["riesgo"]:
+            st.error(f"🚨 ALERTA DE RIESGO: Posibles cheques rechazados")
+            st.write(f"El sistema detectó menciones de **'SIN FONDOS'** o similares {resultado_web['cantidad_estimada']} veces en la web externa.")
+            st.warning("La API oficial no los muestra, pero la web sí. Se recomienda revisar manualmente.")
+            st.link_button("Ver reporte completo en Web Externa", resultado_web['link'])
+
+        # 2. AMARILLO: Deuda Bancaria
+        elif hay_deuda_bancos:
+            st.warning("⚠️ El cliente tiene deudas bancarias (Situación > 1)")
+            st.json(deudas)
+
+        # 3. VERDE: Limpio
         else:
-            st.success("✅ CLIENTE LIMPIO")
-            st.write("No se encontraron deudas ni cheques en las fuentes consultadas.")
-            st.balloons()
+            st.success("✅ Aparentemente Limpio")
+            st.write("No se encontraron deudas bancarias ni palabras clave de rechazo en la web.")
+            st.caption("Recuerda: Ningún sistema es infalible. Ante la duda, pedir referencias.")
 
