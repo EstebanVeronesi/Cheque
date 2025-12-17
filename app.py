@@ -1,102 +1,135 @@
 import streamlit as st
+import requests
+import urllib3
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 import time
 
+# --- CONFIGURACIÓN ---
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="Scanner Frigorífico", page_icon="🥩")
 
-def espiar_con_selenium(cuit_raw):
-    # Formateo de CUIT
+# --- MOTOR 1: API OFICIAL (Bancos) ---
+def consultar_deuda_bancaria(cuit):
+    url = f"https://api.bcra.gob.ar/centraldedeudores/v1.0/Deudas/{cuit}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0'}
+    try:
+        r = requests.get(url, headers=headers, verify=False, timeout=5)
+        if r.status_code == 200:
+            return r.json().get('results', [])
+    except:
+        pass
+    return []
+
+# --- MOTOR 2: BÚSQUEDA WEB (DuckDuckGo via Selenium) ---
+def buscar_rastro_web(cuit_raw):
     s_cuit = str(cuit_raw)
-    cuit_fmt = f"{s_cuit[:2]}-{s_cuit[2:-1]}-{s_cuit[-1]}"
     
-    # URL del objetivo (Usamos CuitOnline porque BCRA tiene Captcha que bloquea a Selenium)
-    url = f"https://www.cuitonline.com/detalle/{cuit_fmt}/"
+    # Buscamos en la versión HTML de DuckDuckGo (más ligera y sin tanto bloqueo)
+    # Query: CUIT + palabras clave
+    query = f'"{s_cuit}" (cheque rechazado OR sin fondos OR deudor OR central deudores)'
+    url_busqueda = f"https://html.duckduckgo.com/html/?q={query}"
     
-    # --- CONFIGURACIÓN DE CHROME HEADLESS (Para Nube) ---
     options = Options()
-    options.add_argument("--headless")  # No abrir ventana gráfica
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     
-    status = "Limpio"
-    evidencia = []
+    reporte = {"riesgo": False, "hallazgos": [], "link": url_busqueda}
     
     try:
-        # Iniciamos el navegador
         driver = webdriver.Chrome(options=options)
-        driver.get(url)
+        driver.get(url_busqueda)
+        time.sleep(2) # Esperar carga
         
-        # Esperamos a que cargue (JavaScript, Tablas, Publicidad)
-        time.sleep(3) 
+        # Analizamos los resultados de búsqueda (Snippets)
+        resultados = driver.find_elements(By.CLASS_NAME, "result__body")
         
-        # Leemos TODO el texto visible de la página
-        body = driver.find_element(By.TAG_NAME, "body").text.upper()
+        palabras_gatillo = ["SIN FONDOS", "RECHAZADO", "IMPAGA", "DEUDA", "SITUACION 4", "SITUACION 5"]
         
-        # Palabras clave de terror para un vendedor
-        palabras_clave = [
-            "SIN FONDOS", 
-            "CHEQUE RECHAZADO", 
-            "CUENTA CERRADA", 
-            "INHABILITADO",
-            "DEUDA IRRECUPERABLE",
-            "SITUACIÓN 4",
-            "SITUACIÓN 5"
-        ]
-        
-        # Buscamos coincidencias
-        for palabra in palabras_clave:
-            if palabra in body:
-                evidencia.append(palabra)
-        
-        # Si encontramos algo, capturamos el contexto
-        if evidencia:
-            status = "PELIGRO"
-            
+        for res in resultados:
+            texto = res.text.upper()
+            # Si el snippet contiene el CUIT y alguna palabra peligrosa
+            if s_cuit in texto:
+                for p in palabras_gatillo:
+                    if p in texto:
+                        # Encontramos un resultado sospechoso
+                        reporte["riesgo"] = True
+                        # Guardamos un fragmento del texto encontrado (limpiando un poco)
+                        fragmento = texto.replace("\n", " ")[:150] + "..."
+                        if fragmento not in reporte["hallazgos"]:
+                            reporte["hallazgos"].append(fragmento)
+                        break
     except Exception as e:
-        return {"status": "ERROR", "msg": str(e)}
-    
+        print(f"Error DuckDuckGo: {e}")
     finally:
-        # Importante: Cerrar el navegador para no saturar la memoria
         try:
             driver.quit()
         except:
             pass
             
-    return {"status": status, "evidencia": evidencia, "link": url}
+    return reporte
 
 # --- FRONTEND ---
-st.title("🥩 Scanner Profundo (Selenium)")
-st.caption("Este método usa un navegador real. Es más lento pero más preciso.")
+st.title("🥩 Semáforo de Crédito")
+st.info("Consulta API Bancaria + Rastreo en la Web")
 
-cuit_input = st.number_input("CUIT del Cliente", min_value=0, format="%d")
+cuit_input = st.number_input("Ingresá CUIT (Solo números)", min_value=0, format="%d")
 
-if st.button("🕵️‍♂️ ESCANEAR AHORA", type="primary"):
+# Columnas para los botones
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    btn_scan = st.button("🕵️‍♂️ ESCANEAR AUTOMÁTICO", type="primary", use_container_width=True)
+
+with col2:
+    # Link directo a la consulta por CUIT del BCRA (La que tiene Captcha pero es infalible)
+    url_bcra_directa = "https://www.bcra.gob.ar/BCRAyVos/Situacion_Crediticia.asp"
+    st.link_button("🏛️ ABRIR BCRA OFICIAL", url_bcra_directa, use_container_width=True)
+
+if btn_scan:
     if cuit_input < 20000000000:
-        st.error("CUIT muy corto.")
+        st.error("CUIT Inválido")
         st.stop()
         
-    with st.spinner('Iniciando navegador virtual y analizando... (Paciencia, tarda unos segundos)'):
-        resultado = espiar_con_selenium(cuit_input)
+    with st.spinner('Analizando historial bancario y buscando referencias web...'):
         
-        if resultado["status"] == "PELIGRO":
-            st.error("🚨 ALERTA: SE DETECTARON PROBLEMAS")
-            st.write("El navegador encontró las siguientes palabras clave en la ficha del cliente:")
+        # 1. API Bancos
+        deudas = consultar_deuda_bancaria(cuit_input)
+        
+        # 2. Búsqueda Web
+        web_check = buscar_rastro_web(cuit_input)
+        
+        # --- LÓGICA DE SEMÁFORO ---
+        hay_riesgo = False
+        
+        # CASO 1: RASTRO EN LA WEB (Prioridad Alta)
+        if web_check["riesgo"]:
+            hay_riesgo = True
+            st.error("🚨 ALERTA: SE ENCONTRARON REFERENCIAS NEGATIVAS EN LA WEB")
+            st.write("El buscador encontró menciones de este CUIT asociadas a deudas o rechazos:")
+            for hallazgo in web_check["hallazgos"]:
+                st.warning(f"🔎 ...{hallazgo}")
+            st.markdown(f"[Ver resultados de búsqueda completos]({web_check['link']})")
             
-            # Mostramos las palabras encontradas en rojo
-            for e in resultado["evidencia"]:
-                st.markdown(f"- 🔴 **{e}**")
+        # CASO 2: DEUDA BANCARIA (API Oficial)
+        if deudas:
+            situaciones = [d.get('situacion', 1) for d in deudas if isinstance(d, dict)]
+            max_sit = max(situaciones, default=1)
             
-            st.warning("Recomendación: NO aceptar cheques sin revisar manualmente.")
-            st.link_button("Ver Ficha Original", resultado["link"])
-            
-        elif resultado["status"] == "ERROR":
-            st.error("Error al intentar abrir el navegador.")
-            st.code(resultado["msg"])
-            
-        else:
-            st.success("✅ NO SE ENCONTRARON PALABRAS DE RIESGO")
-            st.write("El escaneo de texto completo no arrojó resultados como 'Sin Fondos' o 'Rechazado'.")
-            st.info("De todos modos, verifica referencias.")
+            if max_sit > 1:
+                hay_riesgo = True
+                st.warning(f"⚠️ CUIDADO: Situación Bancaria {max_sit} (BCRA)")
+                st.json(deudas)
+            elif not hay_riesgo:
+                st.success("✅ Situación Bancaria 1 (Normal)")
+                st.info("Tiene cuentas bancarias al día.")
+
+        # CASO 3: LIMPIO (Aparentemente)
+        if not hay_riesgo and not deudas:
+            st.success("✅ SIN RASTROS DETECTADOS")
+            st.write("No aparecen deudas bancarias en la API ni menciones de 'Sin Fondos' en los primeros resultados de búsqueda.")
+            st.info("💡 Consejo: Si la operación es muy grande, usá el botón 'ABRIR BCRA OFICIAL' para confirmar manualmente los últimos 5 días.")
+
