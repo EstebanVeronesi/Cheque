@@ -32,35 +32,58 @@ def consultar_api(cuit):
         return {"error": str(e)}
 
 if st.button("🔍 ANALIZAR CLIENTE", type="primary", use_container_width=True):
-    if cuit_input > 20000000000: # Validación básica de longitud
+    if cuit_input > 20000000000:
         with st.spinner('Consultando BCRA...'):
             data = consultar_api(cuit_input)
             
+            # --- DEBUG TEMPORAL (Opcional: descomentar si falla de nuevo para ver qué llega) ---
+            # st.write("Respuesta cruda de API:", data) 
+            
             if "error" in data:
                 st.error(f"Error de conexión: {data['error']}")
-            elif not data['deudas'] and not data['cheques']:
+            
+            # Verificamos si las listas son realmente listas y no None o Strings
+            deudas = data.get('deudas')
+            cheques = data.get('cheques')
+
+            if not isinstance(deudas, list):
+                deudas = []
+            if not isinstance(cheques, list):
+                cheques = []
+
+            # Si ambas están vacías
+            if not deudas and not cheques:
                 st.warning("No se encontraron datos. ¿El CUIT es correcto?")
             else:
-                # Lógica del Semáforo
-                cant_cheques = len(data['cheques'])
+                # Lógica del Semáforo BLINDADA
+                cant_cheques = len(cheques)
                 peor_situacion = 1
                 
-                if data['deudas']:
-                    situaciones = [d.get('situacion', 1) for d in data['deudas']]
-                    peor_situacion = max(situaciones)
+                # Solo iteramos si hay elementos y si son diccionarios
+                if deudas:
+                    situaciones = []
+                    for d in deudas:
+                        if isinstance(d, dict): # Doble chequeo de seguridad
+                            situaciones.append(d.get('situacion', 1))
+                    
+                    if situaciones:
+                        peor_situacion = max(situaciones)
 
                 # VISUALIZACIÓN
                 if cant_cheques > 0:
                     st.error(f"⛔ PELIGRO: {cant_cheques} CHEQUES RECHAZADOS")
-                    for c in data['cheques']:
-                        st.write(f"📅 {c.get('fechaRechazo')} - 💰 ${c.get('monto')}")
+                    for c in cheques:
+                        # Validamos que 'c' sea dict antes de mostrar
+                        if isinstance(c, dict):
+                            st.write(f"📅 {c.get('fechaRechazo', '?')} - 💰 ${c.get('monto', '?')}")
                 
                 elif peor_situacion > 1:
                     st.warning(f"⚠️ CUIDADO: Situación {peor_situacion} en Central de Deudores")
-                    st.json(data['deudas']) # Muestra detalle si hay deuda
+                    st.json(deudas) 
                 
                 else:
                     st.success("✅ CLIENTE LIMPIO (Sin cheques rechazados y Situación 1)")
                     st.balloons()
     else:
         st.info("Por favor ingresa un CUIT válido.")
+
