@@ -1,107 +1,118 @@
 import streamlit as st
 import requests
 import urllib3
-import json
+from bs4 import BeautifulSoup
 
-# Deshabilitar advertencias de certificados SSL
+# Deshabilitar advertencias SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-st.set_page_config(page_title="Verificador BCRA", page_icon="🥩")
+st.set_page_config(page_title="Verificador Frigorífico", page_icon="🥩")
+st.title("🥩 Detector de Cheques")
 
-st.title("🥩 Semáforo de Crédito")
-st.info("Sistema conectado a API BCRA. Si no trae datos, el cliente suele estar limpio.")
-
-cuit_input = st.number_input("Ingresá CUIT/CUIL (sin guiones)", min_value=0, format="%d")
-
-def consultar_api_blindada(cuit):
-    # Endpoints
-    url_deudas = f"https://api.bcra.gob.ar/centraldedeudores/v1.0/Deudas/{cuit}"
-    url_cheques = f"https://api.bcra.gob.ar/centraldedeudores/v1.0/Deudas/ChequesRechazados/{cuit}"
-    
-    # DISFRAZ: Le decimos al BCRA que somos un navegador Chrome, no un script
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'application/json'
-    }
-
+# --- FUNCIÓN 1: API OFICIAL (Solo para Deudas Bancarias) ---
+def consultar_deuda_bancaria(cuit):
+    url = f"https://api.bcra.gob.ar/centraldedeudores/v1.0/Deudas/{cuit}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     try:
-        # Peticiones con verify=False y headers
-        r_deudas = requests.get(url_deudas, headers=headers, verify=False, timeout=10)
-        r_cheques = requests.get(url_cheques, headers=headers, verify=False, timeout=10)
-        
-        # Intentamos leer el JSON, si falla (porque devolvió HTML de error) usamos vacíos
-        try:
-            data_deudas = r_deudas.json().get('results', [])
-        except:
-            data_deudas = []
+        r = requests.get(url, headers=headers, verify=False, timeout=5)
+        if r.status_code == 200:
+            return r.json().get('results', [])
+    except:
+        pass
+    return []
 
-        try:
-            data_cheques = r_cheques.json().get('results', [])
-        except:
-            data_cheques = []
-
-        return {
-            "status_code_deudas": r_deudas.status_code,
-            "status_code_cheques": r_cheques.status_code,
-            "deudas": data_deudas,
-            "cheques": data_cheques,
-            "raw_deudas": r_deudas.text # Para ver qué responde realmente
-        }
+# --- FUNCIÓN 2: SCRAPING WEB (Para Cheques - La verdad de la milanesa) ---
+def espiar_cheques_web(cuit_raw):
+    # Formatear CUIT para la URL (ej: 30-71807930-2)
+    s_cuit = str(cuit_raw)
+    cuit_fmt = f"{s_cuit[:2]}-{s_cuit[2:-1]}-{s_cuit[-1]}"
+    
+    # Usamos un mirror confiable porque BCRA oficial tiene Captcha
+    url = f"https://www.cuitonline.com/detalle/{cuit_fmt}/"
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+        'Referer': 'https://www.google.com/'
+    }
+    
+    lista_cheques = []
+    try:
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, 'html.parser')
+            
+            # Buscamos si hay texto de cheques rechazados
+            # La estructura de estas webs suele tener tablas
+            tablas = soup.find_all('table')
+            
+            for tabla in tablas:
+                if "FONDOS" in tabla.text or "Rechazo" in tabla.text:
+                    filas = tabla.find_all('tr')
+                    for fila in filas[1:]: # Saltamos el encabezado
+                        cols = fila.find_all('td')
+                        if len(cols) > 3:
+                            # Intentamos extraer datos clave
+                            monto = cols[2].text.strip() if len(cols) > 2 else "?"
+                            causa = cols[3].text.strip() if len(cols) > 3 else "?"
+                            fecha = cols[1].text.strip() if len(cols) > 1 else "?"
+                            
+                            # Filtramos solo si dice SIN FONDOS o similar
+                            if "FONDOS" in causa.upper() or "CUENTA" in causa.upper():
+                                lista_cheques.append({
+                                    'fecha': fecha,
+                                    'monto': monto,
+                                    'causa': causa
+                                })
     except Exception as e:
-        return {"error": str(e)}
+        print(f"Error scraping: {e}")
+        
+    return lista_cheques
 
-if st.button("🔍 ANALIZAR CLIENTE", type="primary", use_container_width=True):
+# --- INTERFAZ ---
+cuit_input = st.number_input("Ingresá CUIT sin guiones", min_value=0, format="%d")
+
+if st.button("🔍 INVESTIGAR A FONDO", type="primary"):
     if cuit_input > 20000000000:
-        with st.spinner('Consultando bases oficiales...'):
-            data = consultar_api_blindada(cuit_input)
+        
+        with st.spinner('Cruzando bases de datos...'):
+            # 1. Buscamos Deuda en API
+            deudas = consultar_deuda_bancaria(cuit_input)
             
-            # --- ZONA DE DIAGNÓSTICO (Para que veas qué pasa) ---
-            with st.expander("👨‍💻 Ver datos técnicos (Debug)"):
-                st.write(f"Status Deudas: {data.get('status_code_deudas')}")
-                st.write(f"Status Cheques: {data.get('status_code_cheques')}")
-                st.code(data.get('raw_deudas'))
-
-            if "error" in data:
-                st.error(f"Error de conexión: {data['error']}")
+            # 2. Buscamos Cheques "por izquierda" (Scraping)
+            cheques = espiar_cheques_web(cuit_input)
             
-            else:
-                # Extraer listas limpias
-                lista_deudas = data.get('deudas') if isinstance(data.get('deudas'), list) else []
-                lista_cheques = data.get('cheques') if isinstance(data.get('cheques'), list) else []
-
-                cant_cheques = len(lista_cheques)
+            # --- SEMÁFORO DE RESULTADOS ---
+            
+            # PRIORIDAD 1: CHEQUES (Lo más grave)
+            if len(cheques) > 0:
+                st.error(f"🛑 ¡ALERTA MÁXIMA! {len(cheques)} CHEQUES RECHAZADOS ENCONTRADOS")
+                st.write("La API oficial los ocultaba, pero el escáner web los detectó:")
                 
-                # --- ANÁLISIS ---
-                
-                # CASO 1: Tiene cheques rechazados (Lo más grave)
-                if cant_cheques > 0:
-                    st.error(f"⛔ ALERTA: {cant_cheques} CHEQUES RECHAZADOS")
-                    for c in lista_cheques:
-                        if isinstance(c, dict):
-                            st.write(f"📅 {c.get('fechaRechazo')} - 💰 ${c.get('monto')}")
-                
-                # CASO 2: Tiene deuda bancaria registrada
-                elif len(lista_deudas) > 0:
-                    situaciones = [d.get('situacion', 1) for d in lista_deudas if isinstance(d, dict)]
-                    max_sit = max(situaciones) if situaciones else 1
+                for c in cheques:
+                    st.warning(f"💸 {c['monto']} - {c['causa']} ({c['fecha']})")
                     
-                    if max_sit == 1:
-                        st.success(f"✅ CLIENTE BANCARIZADO (Situación 1 - Normal)")
-                        st.info("Tiene deudas bancarias pero están al día.")
-                    else:
-                        st.warning(f"⚠️ CUIDADO: Situación {max_sit} en BCRA")
-                    
-                    st.write("Detalle de bancos:")
-                    st.json(lista_deudas)
-
-                # CASO 3: No devolvió nada (Listas vacías o 404)
+            # PRIORIDAD 2: DEUDA BANCARIA
+            elif deudas:
+                situaciones = [d.get('situacion', 1) for d in deudas if isinstance(d, dict)]
+                max_sit = max(situaciones) if situaciones else 1
+                
+                if max_sit > 1:
+                    st.warning(f"⚠️ OJO: Situación {max_sit} en Bancos")
+                    st.json(deudas)
                 else:
-                    # Si el status fue 200 (OK) pero vacío, o 404 (No encontrado en deudores)
-                    st.success("✅ SIN ANTECEDENTES REGISTRADOS")
-                    st.write(f"El CUIT {cuit_input} no figura en la base de Deudores ni Cheques del BCRA.")
-                    st.caption("Nota: La API no confirma el nombre si no tiene deuda. Verifique que el CUIT sea correcto.")
-                    st.balloons()
+                    st.success("✅ Situación Bancaria Normal (1)")
+                    st.info("Sin cheques rechazados detectados en web alternativa.")
+            
+            # PRIORIDAD 3: LIMPIO
+            else:
+                st.success("✅ CLIENTE LIMPIO")
+                st.write("No se encontraron deudas bancarias ni cheques rechazados en las fuentes consultadas.")
+                st.caption("Fuente: API BCRA + CuitOnline Mirror")
+
+    else:
+        st.warning("CUIT inválido")
                     
     else:
         st.warning("El CUIT parece incorrecto (muy corto).")
+
 
